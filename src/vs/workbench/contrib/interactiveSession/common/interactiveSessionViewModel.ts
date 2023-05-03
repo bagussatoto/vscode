@@ -7,10 +7,11 @@ import { Emitter, Event } from 'vs/base/common/event';
 import { IMarkdownString, MarkdownString } from 'vs/base/common/htmlContent';
 import { Disposable } from 'vs/base/common/lifecycle';
 import { URI } from 'vs/base/common/uri';
+import { localize } from 'vs/nls';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { ILogService } from 'vs/platform/log/common/log';
-import { IInteractiveRequestModel, IInteractiveResponseErrorDetails, IInteractiveResponseModel, IInteractiveSessionModel, IInteractiveSessionWelcomeMessageModel, IInteractiveWelcomeMessageContent } from 'vs/workbench/contrib/interactiveSession/common/interactiveSessionModel';
-import { IInteractiveSessionReplyFollowup, IInteractiveSessionResponseCommandFollowup, IInteractiveSessionService } from 'vs/workbench/contrib/interactiveSession/common/interactiveSessionService';
+import { IInteractiveRequestModel, IInteractiveResponseModel, IInteractiveSessionModel, IInteractiveWelcomeMessageContent } from 'vs/workbench/contrib/interactiveSession/common/interactiveSessionModel';
+import { IInteractiveResponseErrorDetails, IInteractiveSessionReplyFollowup, IInteractiveSessionResponseCommandFollowup, InteractiveSessionVoteDirection } from 'vs/workbench/contrib/interactiveSession/common/interactiveSessionService';
 import { countWords } from 'vs/workbench/contrib/interactiveSession/common/interactiveSessionWordCounter';
 
 export function isRequestVM(item: unknown): item is IInteractiveRequestViewModel {
@@ -26,15 +27,19 @@ export function isWelcomeVM(item: unknown): item is IInteractiveWelcomeMessageVi
 }
 
 export interface IInteractiveSessionViewModel {
-	readonly sessionId: number;
+	readonly providerId: string;
+	readonly sessionId: string;
 	readonly onDidDisposeModel: Event<void>;
 	readonly onDidChange: Event<void>;
-	readonly welcomeMessage: IInteractiveWelcomeMessageViewModel | undefined;
-	getItems(): (IInteractiveRequestViewModel | IInteractiveResponseViewModel)[];
+	readonly requestInProgress: boolean;
+	readonly inputPlaceholder?: string;
+	getItems(): (IInteractiveRequestViewModel | IInteractiveResponseViewModel | IInteractiveWelcomeMessageViewModel)[];
 }
 
 export interface IInteractiveRequestViewModel {
 	readonly id: string;
+	/** This ID updates every time the underlying data changes */
+	readonly dataId: string;
 	readonly username: string;
 	readonly avatarIconUri?: URI;
 	readonly message: string | IInteractiveSessionReplyFollowup;
@@ -58,6 +63,8 @@ export interface IInteractiveSessionLiveUpdateData {
 export interface IInteractiveResponseViewModel {
 	readonly onDidChange: Event<void>;
 	readonly id: string;
+	/** This ID updates every time the underlying data changes */
+	readonly dataId: string;
 	readonly providerId: string;
 	readonly providerResponseId: string | undefined;
 	readonly username: string;
@@ -66,13 +73,14 @@ export interface IInteractiveResponseViewModel {
 	readonly isComplete: boolean;
 	readonly isCanceled: boolean;
 	readonly isPlaceholder: boolean;
+	readonly vote: InteractiveSessionVoteDirection | undefined;
 	readonly replyFollowups?: IInteractiveSessionReplyFollowup[];
 	readonly commandFollowups?: IInteractiveSessionResponseCommandFollowup[];
 	readonly errorDetails?: IInteractiveResponseErrorDetails;
-	readonly progressiveResponseRenderingEnabled: boolean;
 	readonly contentUpdateTimings?: IInteractiveSessionLiveUpdateData;
 	renderData?: IInteractiveResponseRenderData;
 	currentRenderedHeight: number | undefined;
+	setVote(vote: InteractiveSessionVoteDirection): void;
 }
 
 export class InteractiveSessionViewModel extends Disposable implements IInteractiveSessionViewModel {
@@ -84,41 +92,38 @@ export class InteractiveSessionViewModel extends Disposable implements IInteract
 
 	private readonly _items: (IInteractiveRequestViewModel | IInteractiveResponseViewModel)[] = [];
 
-	get welcomeMessage() {
-		return this._model.welcomeMessage;
+	get inputPlaceholder(): string | undefined {
+		return this._model.inputPlaceholder;
 	}
 
 	get sessionId() {
 		return this._model.sessionId;
 	}
 
-	private readonly _progressiveResponseRenderingEnabled: boolean;
-	get progressiveResponseRenderingEnabled(): boolean {
-		return this._progressiveResponseRenderingEnabled;
+	get requestInProgress(): boolean {
+		return this._model.requestInProgress;
+	}
+
+	get providerId() {
+		return this._model.providerId;
 	}
 
 	constructor(
 		private readonly _model: IInteractiveSessionModel,
-		@IInteractiveSessionService private readonly interactiveSessionService: IInteractiveSessionService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 	) {
 		super();
 
-		this._progressiveResponseRenderingEnabled = this.interactiveSessionService.progressiveRenderingEnabled(this._model.providerId);
-
 		_model.getRequests().forEach((request, i) => {
 			this._items.push(new InteractiveRequestViewModel(request));
 			if (request.response) {
-				this._items.push(this.instantiationService.createInstance(InteractiveResponseViewModel, request.response, this.progressiveResponseRenderingEnabled));
+				this.onAddResponse(request.response);
 			}
 		});
 
 		this._register(_model.onDidDispose(() => this._onDidDisposeModel.fire()));
 		this._register(_model.onDidChange(e => {
-			if (e.kind === 'clear') {
-				this._items.length = 0;
-				this._onDidChange.fire();
-			} else if (e.kind === 'addRequest') {
+			if (e.kind === 'addRequest') {
 				this._items.push(new InteractiveRequestViewModel(e.request));
 				if (e.request.response) {
 					this.onAddResponse(e.request.response);
@@ -132,13 +137,13 @@ export class InteractiveSessionViewModel extends Disposable implements IInteract
 	}
 
 	private onAddResponse(responseModel: IInteractiveResponseModel) {
-		const response = this.instantiationService.createInstance(InteractiveResponseViewModel, responseModel, this.progressiveResponseRenderingEnabled);
+		const response = this.instantiationService.createInstance(InteractiveResponseViewModel, responseModel);
 		this._register(response.onDidChange(() => this._onDidChange.fire()));
 		this._items.push(response);
 	}
 
 	getItems() {
-		return [...this._items];
+		return [...(this._model.welcomeMessage ? [this._model.welcomeMessage] : []), ...this._items];
 	}
 
 	override dispose() {
@@ -152,6 +157,10 @@ export class InteractiveSessionViewModel extends Disposable implements IInteract
 export class InteractiveRequestViewModel implements IInteractiveRequestViewModel {
 	get id() {
 		return this._model.id;
+	}
+
+	get dataId() {
+		return this.id + (this._model.session.isInitialized ? '' : '_initializing');
 	}
 
 	get username() {
@@ -176,18 +185,17 @@ export class InteractiveRequestViewModel implements IInteractiveRequestViewModel
 }
 
 export class InteractiveResponseViewModel extends Disposable implements IInteractiveResponseViewModel {
-	private _changeCount = 0;
+	private _modelChangeCount = 0;
 
 	private readonly _onDidChange = this._register(new Emitter<void>());
 	readonly onDidChange = this._onDidChange.event;
 
-	private _isPlaceholder = false;
-	get isPlaceholder() {
-		return this._isPlaceholder;
+	get id() {
+		return this._model.id;
 	}
 
-	get id() {
-		return this._model.id + `_${this._changeCount}`;
+	get dataId() {
+		return this._model.id + `_${this._modelChangeCount}` + (this._model.session.isInitialized ? '' : '_initializing');
 	}
 
 	get providerId() {
@@ -208,7 +216,7 @@ export class InteractiveResponseViewModel extends Disposable implements IInterac
 
 	get response(): IMarkdownString {
 		if (this._isPlaceholder) {
-			return new MarkdownString('Thinking...');
+			return new MarkdownString(localize('thinking', "Thinking") + '\u2026');
 		}
 
 		return this._model.response;
@@ -220,6 +228,11 @@ export class InteractiveResponseViewModel extends Disposable implements IInterac
 
 	get isCanceled() {
 		return this._model.isCanceled;
+	}
+
+	private _isPlaceholder = false;
+	get isPlaceholder() {
+		return this._isPlaceholder;
 	}
 
 	get replyFollowups() {
@@ -234,6 +247,10 @@ export class InteractiveResponseViewModel extends Disposable implements IInterac
 		return this._model.errorDetails;
 	}
 
+	get vote() {
+		return this._model.vote;
+	}
+
 	renderData: IInteractiveResponseRenderData | undefined = undefined;
 
 	currentRenderedHeight: number | undefined;
@@ -245,7 +262,6 @@ export class InteractiveResponseViewModel extends Disposable implements IInterac
 
 	constructor(
 		private readonly _model: IInteractiveResponseModel,
-		public readonly progressiveResponseRenderingEnabled: boolean,
 		@ILogService private readonly logService: ILogService
 	) {
 		super();
@@ -264,9 +280,6 @@ export class InteractiveResponseViewModel extends Disposable implements IInterac
 		this._register(_model.onDidChange(() => {
 			if (this._isPlaceholder && (_model.response.value || this.isComplete)) {
 				this._isPlaceholder = false;
-				if (this.renderData) {
-					this.renderData.renderedWordCount = 0;
-				}
 			}
 
 			if (this._contentUpdateTimings) {
@@ -281,8 +294,6 @@ export class InteractiveResponseViewModel extends Disposable implements IInterac
 						loadingStartTime: this._contentUpdateTimings!.loadingStartTime,
 						lastUpdateTime: now,
 						wordCountAfterLastUpdate: wordCount,
-						// lastUpdateNewWordCount: wordCount - this._contentUpdateTimings!.wordCountAfterLastUpdate,
-						// lastUpdateDuration: now - this._contentUpdateTimings!.lastUpdateTime, // none
 						impliedWordLoadRate
 					};
 				} else {
@@ -293,7 +304,7 @@ export class InteractiveResponseViewModel extends Disposable implements IInterac
 			}
 
 			// new data -> new id, new content to render
-			this._changeCount++;
+			this._modelChangeCount++;
 			if (this.renderData) {
 				this.renderData.isFullyRendered = false;
 				this.renderData.lastRenderTime = Date.now();
@@ -306,6 +317,11 @@ export class InteractiveResponseViewModel extends Disposable implements IInterac
 	private trace(tag: string, message: string) {
 		this.logService.trace(`InteractiveResponseViewModel#${tag}: ${message}`);
 	}
+
+	setVote(vote: InteractiveSessionVoteDirection): void {
+		this._modelChangeCount++;
+		this._model.setVote(vote);
+	}
 }
 
 export interface IInteractiveWelcomeMessageViewModel {
@@ -313,24 +329,4 @@ export interface IInteractiveWelcomeMessageViewModel {
 	readonly username: string;
 	readonly avatarIconUri?: URI;
 	readonly content: IInteractiveWelcomeMessageContent[];
-}
-
-export class InteractiveWelcomeMessageViewModel implements IInteractiveWelcomeMessageViewModel {
-	get id() {
-		return this._model.id;
-	}
-
-	get username() {
-		return this._model.username;
-	}
-
-	get avatarIconUri() {
-		return this._model.avatarIconUri;
-	}
-
-	get content() {
-		return this._model.content;
-	}
-
-	constructor(readonly _model: IInteractiveSessionWelcomeMessageModel) { }
 }

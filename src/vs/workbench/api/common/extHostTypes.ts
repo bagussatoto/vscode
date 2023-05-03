@@ -623,12 +623,6 @@ export class TextEdit {
 	}
 }
 
-export enum NotebookDocumentSaveReason {
-	Manual = 1,
-	AfterDelay = 2,
-	FocusOut = 3
-}
-
 @es5ClassCompat
 export class NotebookEdit implements vscode.NotebookEdit {
 
@@ -714,7 +708,7 @@ export interface IFileOperationOptions {
 	readonly ignoreIfExists?: boolean;
 	readonly ignoreIfNotExists?: boolean;
 	readonly recursive?: boolean;
-	readonly contents?: Uint8Array;
+	readonly contents?: Uint8Array | vscode.DataTransferFile;
 }
 
 export const enum FileEditType {
@@ -784,7 +778,7 @@ export class WorkspaceEdit implements vscode.WorkspaceEdit {
 		this._edits.push({ _type: FileEditType.File, from, to, options, metadata });
 	}
 
-	createFile(uri: vscode.Uri, options?: { readonly overwrite?: boolean; readonly ignoreIfExists?: boolean; readonly contents?: Uint8Array }, metadata?: vscode.WorkspaceEditEntryMetadata): void {
+	createFile(uri: vscode.Uri, options?: { readonly overwrite?: boolean; readonly ignoreIfExists?: boolean; readonly contents?: Uint8Array | vscode.DataTransferFile }, metadata?: vscode.WorkspaceEditEntryMetadata): void {
 		this._edits.push({ _type: FileEditType.File, from: undefined, to: uri, options, metadata });
 	}
 
@@ -1737,6 +1731,8 @@ export class InlineSuggestionList implements vscode.InlineCompletionList {
 
 	commands: vscode.Command[] | undefined = undefined;
 
+	suppressSuggestions: boolean | undefined = undefined;
+
 	constructor(items: vscode.InlineCompletionItem[]) {
 		this.items = items;
 	}
@@ -2588,7 +2584,7 @@ export enum TreeItemCheckboxState {
 }
 
 @es5ClassCompat
-export class DataTransferItem {
+export class DataTransferItem implements vscode.DataTransferItem {
 
 	async asString(): Promise<string> {
 		return typeof this.value === 'string' ? this.value : JSON.stringify(this.value);
@@ -2605,6 +2601,29 @@ export class DataTransferItem {
 		id?: string,
 	) {
 		this.id = id ?? generateUuid();
+	}
+}
+
+/**
+ * Intentionally not exported to extensions
+ */
+export class DataTransferFile implements vscode.DataTransferFile {
+
+	public readonly name: string;
+	public readonly uri: vscode.Uri | undefined;
+
+	public readonly _itemId: string;
+	private readonly _getData: () => Promise<Uint8Array>;
+
+	constructor(name: string, uri: vscode.Uri | undefined, itemId: string, getData: () => Promise<Uint8Array>) {
+		this.name = name;
+		this.uri = uri;
+		this._itemId = itemId;
+		this._getData = getData;
+	}
+
+	data(): Promise<Uint8Array> {
+		return this._getData();
 	}
 }
 
@@ -2667,11 +2686,14 @@ export class DocumentDropEdit {
 
 @es5ClassCompat
 export class DocumentPasteEdit {
+	label: string;
+
 	insertText: string | SnippetString;
 
 	additionalEdit?: WorkspaceEdit;
 
-	constructor(insertText: string | SnippetString) {
+	constructor(insertText: string | SnippetString, label: string) {
+		this.label = label;
 		this.insertText = insertText;
 	}
 }
@@ -3054,6 +3076,11 @@ export enum CommentThreadCollapsibleState {
 export enum CommentMode {
 	Editing = 0,
 	Preview = 1
+}
+
+export enum CommentState {
+	Published = 0,
+	Draft = 1
 }
 
 export enum CommentThreadState {
@@ -3971,6 +3998,16 @@ export enum InteractiveSessionVoteDirection {
 export enum InteractiveSessionCopyKind {
 	Action = 1,
 	Toolbar = 2
+}
+
+//#endregion
+
+//#region Interactive Editor
+
+export enum InteractiveEditorResponseFeedbackKind {
+	Unhelpful = 0,
+	Helpful = 1,
+	Undone = 2
 }
 
 //#endregion
